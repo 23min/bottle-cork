@@ -29,12 +29,12 @@ setup(
         'bottle',
         'beaker',
         'pycrypto',
-        'setuptools',
+        'setuptools'
     ],
     packages = ['cork'],
     platforms = ['Linux'],
     test_suite='nose.collector',
-    tests_require=['nose'],
+    tests_require=['nose']
 )
 
 
