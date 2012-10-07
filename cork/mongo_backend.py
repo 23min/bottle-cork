@@ -7,7 +7,7 @@ class MongoException(Exception):
 
 class MongoDbBackend(object):
 
-    def __init__(self, server, port, database, users_store='users',
+    def __init__(self, server=None, port=None, database=None, username=None, password=None,users_store='users',
                  roles_store='roles', pending_regs_store='register', initialize=False, safe=True):
         """Data storage class. Handles MongoDb database
 
@@ -35,6 +35,9 @@ class MongoDbBackend(object):
 
         self._connection = pymongo.Connection(server,port)
         self._database = self._connection[database]
+
+        if (username):
+            self._database.authenticate(username, password)
 
         self._users_collection = self._database[users_store]
         self.users = self.Users(self._users_collection)
