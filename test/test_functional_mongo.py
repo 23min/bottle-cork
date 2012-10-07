@@ -4,7 +4,7 @@
 # Requires WebTest http://webtest.pythonpaste.org/
 # sudo aptitude install python-webtest
 #
-# Run as: nosetests functional_test.py
+# Run as: nosetests functional_test_mongo.py
 #
 
 from nose.tools import assert_raises, raises, with_setup
@@ -15,7 +15,7 @@ import glob
 import os, sys
 import shutil
 
-from cork import Cork, JsonBackend
+from cork import Cork, MongoDbBackend
 
 REDIR = '302 Found'
 app = None
@@ -28,31 +28,24 @@ if sys.platform == 'darwin':
 else:
     tmproot = "/dev/shm"
 
-def populate_conf_directory():
+def initialize_database():
     """Populate a directory with valid configuration files, to be run just once
     The files are not modified by each test
     """
-    global tmpdir
-    tmpdir = "%s/cork_functional_test_source" % tmproot
-
-    # only do this once, as advertised
-    if os.path.exists(tmpdir): return
-
-    os.mkdir(tmpdir)
-    os.mkdir(tmpdir + "/example_conf")
-
-    backend = JsonBackend(
-        tmpdir + "/example_conf",
-        users_fname='users',
-        roles_fname='roles',
-        pending_reg_fname='register',
-        initialize=True)
+    backend = MongoDbBackend(
+        server = "localhost",
+        port = 27017,
+        database = "sample_webapp",
+        initialize=True,
+        users_store="users",
+        roles_store="roles",
+        pending_regs_store="register",
+    )
     cork = Cork(backend)
 
     cork._store.roles['admin'] = 100
     cork._store.roles['editor'] = 60
     cork._store.roles['user'] = 50
-    cork._store._savejson('roles', cork._store.roles)
 
     tstamp = str(datetime.utcnow())
     username = password = 'admin'
@@ -64,7 +57,7 @@ def populate_conf_directory():
         'desc': username + ' test user',
         'creation_date': tstamp
     }
-    username = password = ''
+    username = password = 'user'
     cork._store.users[username] = {
         'username': username,
         'role': 'user',
@@ -73,7 +66,7 @@ def populate_conf_directory():
         'desc': username + ' test user',
         'creation_date': tstamp
     }
-    cork._store._save_users()
+
 
 def remove_temp_dir():
     for f in glob.glob('%s/cork_functional_test_wd*' % tmproot, ):
@@ -85,8 +78,8 @@ def setup_app():
     global tmpdir
     global orig_dir
 
-    # create json files to be used by Cork
-    populate_conf_directory()
+    # Initialize the MongoDb database
+    initialize_database()
 
     # purge the temporary test directory
     remove_temp_dir()
@@ -98,14 +91,13 @@ def setup_app():
 
     # copy the needed files
     tmp_source = "%s/cork_functional_test_source" % tmproot
-    shutil.copytree(tmp_source + '/example_conf', tmpdir + '/example_conf')
     shutil.copytree(orig_dir + '/test/views', tmpdir + '/views')
     os.chdir(tmpdir)
 
     # create global TestApp instance
     global app
     import simple_webapp
-    simple_webapp.configure()
+    simple_webapp.configure(backend_type="mongobackend")
     app = TestApp(simple_webapp.app)
 
 def login():
@@ -113,14 +105,10 @@ def login():
     global app
     setup_app()
     p = app.post('/login', {'username': 'admin', 'password': 'admin'})
-    assert p.status == REDIR, "Redirect expected"
-    assert p.location == 'http://localhost:80/', \
-        "Incorrect redirect to %s" % p.location
 
 def teardown():
     remove_temp_dir()
     app = None
-
 
 @with_setup(login, teardown)
 def test_functional_login():
@@ -128,53 +116,53 @@ def test_functional_login():
     assert app.get('/admin').status == '200 OK'
 
 @with_setup(setup_app, teardown)
-def test_login_existing_user_none_password():
+def test_login_existent_user_none_password():
     p = app.post('/login', {'username': 'admin', 'password': None})
     assert p.status == REDIR, "Redirect expected"
-    assert p.location == 'http://localhost:80/login', \
-        "Incorrect redirect to %s" % p.location
+    assert p.location == 'http://localhost:80/login',\
+    "Incorrect redirect to %s" % p.location
 
 @with_setup(setup_app, teardown)
 def test_login_nonexistent_user_none_password():
     p = app.post('/login', {'username': 'IAmNotHere', 'password': None})
     assert p.status == REDIR, "Redirect expected"
-    assert p.location == 'http://localhost:80/login', \
-        "Incorrect redirect to %s" % p.location
+    assert p.location == 'http://localhost:80/login',\
+    "Incorrect redirect to %s" % p.location
 
 @with_setup(setup_app, teardown)
-def test_login_existing_user_empty_password():
+def test_login_existent_user_empty_password():
     p = app.post('/login', {'username': 'admin', 'password': ''})
     assert p.status == REDIR, "Redirect expected"
-    assert p.location == 'http://localhost:80/login', \
-        "Incorrect redirect to %s" % p.location
+    assert p.location == 'http://localhost:80/login',\
+    "Incorrect redirect to %s" % p.location
 
 @with_setup(setup_app, teardown)
 def test_login_nonexistent_user_empty_password():
     p = app.post('/login', {'username': 'IAmNotHere', 'password': ''})
     assert p.status == REDIR, "Redirect expected"
-    assert p.location == 'http://localhost:80/login', \
-        "Incorrect redirect to %s" % p.location
+    assert p.location == 'http://localhost:80/login',\
+    "Incorrect redirect to %s" % p.location
 
 @with_setup(setup_app, teardown)
-def test_login_existing_user_wrong_password():
+def test_login_existent_user_wrong_password():
     p = app.post('/login', {'username': 'admin', 'password': 'BogusPassword'})
     assert p.status == REDIR, "Redirect expected"
-    assert p.location == 'http://localhost:80/login', \
-        "Incorrect redirect to %s" % p.location
+    assert p.location == 'http://localhost:80/login',\
+    "Incorrect redirect to %s" % p.location
 
 @with_setup(setup_app, teardown)
 def test_functional_login_logout():
     # Incorrect login
     p = app.post('/login', {'username': 'admin', 'password': 'BogusPassword'})
     assert p.status == REDIR
-    assert p.location == 'http://localhost:80/login', \
-        "Incorrect redirect to %s" % p.location
+    assert p.location == 'http://localhost:80/login',\
+    "Incorrect redirect to %s" % p.location
 
     # log in and get a cookie
     p = app.post('/login', {'username': 'admin', 'password': 'admin'})
     assert p.status == REDIR
-    assert p.location == 'http://localhost:80/', \
-        "Incorrect redirect to %s" % p.location
+    assert p.location == 'http://localhost:80/',\
+    "Incorrect redirect to %s" % p.location
 
     # fetch a page successfully
     assert app.get('/admin').status == '200 OK'

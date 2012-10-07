@@ -9,7 +9,10 @@ import shutil
 
 from cork import Cork, AAAException, AuthException
 from cork import Mailer
-from cork import JsonBackend
+from cork import MongoDbBackend
+
+import pymongo
+connection = None
 
 testdir = None # Test directory
 aaa = None # global Cork instance
@@ -26,7 +29,6 @@ class RoAttrDict(dict):
     """
     def __getattr__(self, name):
         return self[name]
-
 
 class MockedAdminCork(Cork):
     """Mocked module where the current user is always 'admin'"""
@@ -48,11 +50,17 @@ class MockedUnauthenticatedCork(Cork):
         global cookie_name
         cookie_name = username
 
+def get_test_dir():
+    tstamp = "%f" % time()
+    if sys.platform == 'darwin':
+        return "/tmp/fl_%s" % tstamp
+    else:
+        return "/dev/shm/fl_%s" % tstamp
+
 def setup_empty_dir():
     """Setup test directory without JSON files"""
     global testdir
-    tstamp = "%f" % time()
-    testdir = "%s/fl_%s" % (tmproot, tstamp)
+    testdir = get_test_dir()
     os.mkdir(testdir)
     os.mkdir(testdir + '/views')
     print "setup done in %s" % testdir
@@ -60,44 +68,73 @@ def setup_empty_dir():
 def setup_dir():
     """Setup test directory with valid JSON files"""
     global testdir
-    tstamp = "%f" % time()
-    testdir = "%s/fl_%s" % (tmproot, tstamp)
+    testdir = get_test_dir()
     os.mkdir(testdir)
     os.mkdir(testdir + '/views')
-    with open("%s/users.json" % testdir, 'w') as f:
-        f.write("""{"admin": {"email_addr": null, "desc": null, "role": "admin", "hash": "69f75f38ac3bfd6ac813794f3d8c47acc867adb10b806e8979316ddbf6113999b6052efe4ba95c0fa9f6a568bddf60e8e5572d9254dbf3d533085e9153265623", "creation_date": "2012-04-09 14:22:27.075596"}}""")
-    with open("%s/roles.json" % testdir, 'w') as f:
-        f.write("""{"special": 200, "admin": 100, "user": 50}""")
-    with open("%s/register.json" % testdir, 'w') as f:
-        f.write("""{}""")
     with open("%s/views/registration_email.tpl" % testdir, 'w') as f:
         f.write("""Username:{{username}} Email:{{email_addr}} Code:{{registration_code}}""")
     with open("%s/views/password_reset_email.tpl" % testdir, 'w') as f:
         f.write("""Username:{{username}} Email:{{email_addr}} Code:{{reset_code}}""")
     print "setup done in %s" % testdir
 
+def populate_store():
+    """
+    Populate the database with an admin user and three roles
+    """
+    global aaa
+    assert len(aaa._store.users) == 0
+    assert len(aaa._store.roles) == 0
+    assert len(aaa._store.pending_registrations) == 0
+    aaa._store.users["admin"] = {
+        'username':"admin",
+        'role': "admin",
+        'hash': "69f75f38ac3bfd6ac813794f3d8c47acc867adb10b806e8979316ddbf6113999b6052efe4ba95c0fa9f6a568bddf60e8e5572d9254dbf3d533085e9153265623",
+        'email_addr': None,
+        'desc': None,
+        'creation_date': "2012-04-09 14:22:27.075596"
+    }
+    aaa._store.roles["special"] = {"role":"special", "level":200}
+    aaa._store.roles["admin"] = {"role":"admin", "level":100}
+    aaa._store.roles["user"] = {"role":"user", "level":50}
+
 def setup_mockedadmin():
     """Setup test directory and a MockedAdminCork instance"""
     global aaa
     global cookie_name
-    global testdir
     setup_dir()
-    backend = JsonBackend(
-        testdir, users_fname='users',
-        roles_fname='roles', pending_reg_fname='register')
-    aaa = MockedAdminCork(backend, smtp_server='localhost', email_sender='test@localhost')
+    backend = MongoDbBackend(
+        server = "localhost",
+        port = 27017,
+        database = "corkdb",
+        initialize=True,
+        users_store="users",
+        roles_store="roles",
+        pending_regs_store="register",
+    )
+    aaa = MockedAdminCork(
+        backend,
+        smtp_server='localhost',
+        email_sender='test@localhost')
+    populate_store()
     cookie_name = None
 
 def setup_mocked_unauthenticated():
     """Setup test directory and a MockedAdminCork instance"""
     global aaa
     global cookie_name
-    global testdir
     setup_dir()
-    backend = JsonBackend(
-        testdir, users_fname='users',
-        roles_fname='roles', pending_reg_fname='register')
-    aaa = MockedUnauthenticatedCork(backend)
+    backend = MongoDbBackend(
+        server = "localhost",
+        port = 27017,
+        database = "corkdb",
+        initialize=True,
+        users_store="users",
+        roles_store="roles",
+        pending_regs_store="register",
+    )
+    aaa = MockedAdminCork(
+        backend)
+    populate_store()
     cookie_name = None
 
 def teardown_dir():
@@ -110,23 +147,12 @@ def teardown_dir():
 
 @with_setup(setup_dir, teardown_dir)
 def test_init():
-    backend = JsonBackend(testdir, users_fname='users',
-        roles_fname='roles', pending_reg_fname='register',
-        initialize=True)
-    aaa = Cork(backend)
+    global connection
+    connection = pymongo.Connection("localhost",27017)
+    connection.drop_database("corkdb")
 
 @with_setup(setup_dir, teardown_dir)
 def test_initialize_storage():
-    backend = JsonBackend(testdir, users_fname='users',
-        roles_fname='roles', pending_reg_fname='register',
-        initialize=True)
-    aaa = Cork(backend)
-    with open("%s/users.json" % testdir) as f:
-        assert f.readlines() == ['{}']
-    with open("%s/roles.json" % testdir) as f:
-        assert f.readlines() == ['{}']
-    with open("%s/register.json" % testdir) as f:
-        assert f.readlines() == ['{}']
     with open("%s/views/registration_email.tpl" % testdir) as f:
         assert f.readlines() == [
             'Username:{{username}} Email:{{email_addr}} Code:{{registration_code}}']
@@ -134,64 +160,29 @@ def test_initialize_storage():
         assert f.readlines() == [
             'Username:{{username}} Email:{{email_addr}} Code:{{reset_code}}']
 
-@raises(AAAException)
-@with_setup(setup_dir, teardown_dir)
-def test_unable_to_save():
-    bogus_dir = '/___inexisting_directory___'
-    backend = JsonBackend(bogus_dir, users_fname='users',
-        roles_fname='roles', pending_reg_fname='register',
-        initialize=True)
-    aaa = Cork(backend)
-
 @with_setup(setup_mockedadmin, teardown_dir)
 def test_mockedadmin():
     assert len(aaa._store.users) == 1, repr(aaa._store.users)
     assert 'admin' in aaa._store.users, repr(aaa._store.users)
 
 @with_setup(setup_mockedadmin, teardown_dir)
-def test_loadjson_missing_file():
-    assert_raises(AAAException, aaa._store._loadjson, 'nonexistent_file', {})
-
-@raises(AAAException)
-@with_setup(setup_mockedadmin, teardown_dir)
-def test_loadjson_broken_file():
-    with open(testdir + '/broken_file.json', 'w') as f:
-        f.write('-----')
-    aaa._store._loadjson('broken_file', {})
-
-@with_setup(setup_mockedadmin, teardown_dir)
-def test_loadjson_unchanged():
-    # By running _refresh with unchanged files the files should not be reloaded
-    mtimes = aaa._store._mtimes
-    aaa._store._refresh()
-    # The test simply ensures that no mtimes have been updated
-    assert mtimes == aaa._store._mtimes
-
-
-@with_setup(setup_mockedadmin, teardown_dir)
 def test_password_hashing():
     shash = aaa._hash('user_foo', 'bogus_pwd')
     assert len(shash) == 88, "hash length should be 88 and is %d" % len(shash)
     assert shash.endswith('='), "hash should end with '='"
-    assert aaa._verify_password('user_foo', 'bogus_pwd', shash) == True, \
-        "Hashing verification should succeed"
+    assert aaa._verify_password('user_foo', 'bogus_pwd', shash) == True,\
+    "Hashing verification should succeed"
 
 @with_setup(setup_mockedadmin, teardown_dir)
 def test_incorrect_password_hashing():
     shash = aaa._hash('user_foo', 'bogus_pwd')
     assert len(shash) == 88, "hash length should be 88 and is %d" % len(shash)
     assert shash.endswith('='), "hash should end with '='"
-    assert aaa._verify_password('user_foo', '####', shash) == False, \
-        "Hashing verification should fail"
-    assert aaa._verify_password('###', 'bogus_pwd', shash) == False, \
-        "Hashing verification should fail"
+    assert aaa._verify_password('user_foo', '####', shash) == False,\
+    "Hashing verification should fail"
+    assert aaa._verify_password('###', 'bogus_pwd', shash) == False,\
+    "Hashing verification should fail"
 
-@with_setup(setup_mockedadmin, teardown_dir)
-def test_password_hashing_collision():
-    salt = 'S' * 32
-    hash1 = aaa._hash('user_foo', 'bogus_pwd', salt=salt)
-    hash2 = aaa._hash('user_foobogus', '_pwd', salt=salt)
-    assert hash1 != hash2, "Hash collision"
 
 @with_setup(setup_mockedadmin, teardown_dir)
 def test_unauth_create_role():
@@ -212,10 +203,9 @@ def test_create_role():
     assert len(aaa._store.roles) == 3, repr(aaa._store.roles)
     aaa.create_role('user33', 33)
     assert len(aaa._store.roles) == 4, repr(aaa._store.roles)
-    fname = "%s/%s.json" % (aaa._store._directory, aaa._store._roles_fname)
-    with open(fname) as f:
-        data = f.read()
-        assert 'user33' in data, repr(data)
+    global connection
+    db = connection["corkdb"]
+    assert db["roles"].find_one({"role":"user33"}) is not None
 
 
 @with_setup(setup_mockedadmin, teardown_dir)
@@ -232,10 +222,9 @@ def test_create_delete_role():
     assert len(aaa._store.roles) == 3, repr(aaa._store.roles)
     aaa.create_role('user33', 33)
     assert len(aaa._store.roles) == 4, repr(aaa._store.roles)
-    fname = "%s/%s.json" % (aaa._store._directory, aaa._store._roles_fname)
-    with open(fname) as f:
-        data = f.read()
-        assert 'user33' in data, repr(data)
+    global connection
+    db = connection["corkdb"]
+    assert db["roles"].find_one({"role":"user33"}) is not None
     assert aaa._store.roles['user33'] == 33
     aaa.delete_role('user33')
     assert len(aaa._store.roles) == 3, repr(aaa._store.roles)
@@ -266,10 +255,9 @@ def test_create_user():
     assert len(aaa._store.users) == 1, repr(aaa._store.users)
     aaa.create_user('phil','user','user')
     assert len(aaa._store.users) == 2, repr(aaa._store.users)
-    fname = "%s/%s.json" % (aaa._store._directory, aaa._store._users_fname)
-    with open(fname) as f:
-        data = f.read()
-        assert 'phil' in data, repr(data)
+    global connection
+    db = connection["corkdb"]
+    assert db["users"].find_one({"username":"phil"}) is not None
 
 
 @with_setup(setup_mockedadmin, teardown_dir)
@@ -286,10 +274,9 @@ def test_delete_user():
     assert len(aaa._store.users) == 1, repr(aaa._store.users)
     aaa.delete_user('admin')
     assert len(aaa._store.users) == 0, repr(aaa._store.users)
-    fname = "%s/%s.json" % (aaa._store._directory, aaa._store._users_fname)
-    with open(fname) as f:
-        data = f.read()
-        assert 'admin' not in data, "'admin' must not be in %s" % repr(data)
+    global connection
+    db = connection["corkdb"]
+    assert db["users"].find_one({"username":"admin"}) is None
 
 
 @with_setup(setup_mockedadmin, teardown_dir)
@@ -301,23 +288,6 @@ def test_list_users():
 @with_setup(setup_mockedadmin, teardown_dir)
 def test_failing_login():
     login = aaa.login('phil', 'hunter123')
-    assert login == False, "Login must fail"
-    global cookie_name
-    assert cookie_name == None
-
-@with_setup(setup_mockedadmin, teardown_dir)
-def test_login_nonexistent_user_empty_password():
-    login = aaa.login('IAmNotHome', '')
-    assert login == False, "Login must fail"
-    global cookie_name
-    assert cookie_name == None
-
-@with_setup(setup_mockedadmin, teardown_dir)
-def test_login_existing_user_empty_password():
-    aaa.create_user('phil', 'user', 'hunter123')
-    assert 'phil' in aaa._store.users
-    assert aaa._store.users['phil']['role'] == 'user'
-    login = aaa.login('phil', '')
     assert login == False, "Login must fail"
     global cookie_name
     assert cookie_name == None
@@ -438,69 +408,15 @@ def test_register_role_too_high():
 @with_setup(setup_mockedadmin, teardown_dir)
 @mock.patch.object(Mailer, '_send')
 def test_register(mocked):
-    old_dir = os.getcwd()
-    os.chdir(testdir)
     aaa.register('foo', 'pwd', 'a@a.a')
-    os.chdir(old_dir)
     assert len(aaa._store.pending_registrations) == 1, repr(aaa._store.pending_registrations)
 
-
-@with_setup(setup_mockedadmin, teardown_dir)
-def test_smtp_url_parsing_1():
-    c = aaa.mailer._parse_smtp_url('')
-    assert c['proto'] == 'smtp'
-    assert c['user'] == None
-    assert c['pass'] == None
-    assert c['fqdn'] == ''
-    assert c['port'] == 25
-
-@with_setup(setup_mockedadmin, teardown_dir)
-def test_smtp_url_parsing_2():
-    c = aaa.mailer._parse_smtp_url('starttls://foo')
-    assert c['proto'] == 'starttls'
-    assert c['user'] == None
-    assert c['pass'] == None
-    assert c['fqdn'] == 'foo'
-    assert c['port'] == 25
-
-@with_setup(setup_mockedadmin, teardown_dir)
-def test_smtp_url_parsing_3():
-    c = aaa.mailer._parse_smtp_url('foo:443')
-    assert c['proto'] == 'smtp'
-    assert c['user'] == None
-    assert c['pass'] == None
-    assert c['fqdn'] == 'foo'
-    assert c['port'] == 443
-
-@with_setup(setup_mockedadmin, teardown_dir)
-def test_smtp_url_parsing_4():
-    c = aaa.mailer._parse_smtp_url('ssl://user:pass@foo:443/')
-    assert c['proto'] == 'ssl'
-    assert c['user'] == 'user'
-    assert c['pass'] == 'pass'
-    assert c['fqdn'] == 'foo'
-    assert c['port'] == 443
-
-@with_setup(setup_mockedadmin, teardown_dir)
-def test_smtp_url_parsing_1():
-    c = aaa.mailer._parse_smtp_url('')
-    assert c['proto'] == 'smtp'
-    assert c['user'] == None
-    assert c['pass'] == None
-    assert c['fqdn'] == ''
-    assert c['port'] == 25
 
 # Patch the mailer _send() method to prevent network interactions
 @with_setup(setup_mockedadmin, teardown_dir)
 @mock.patch.object(Mailer, '_send')
 def test_send_email(mocked):
-    assert aaa.mailer._conf == {
-        'fqdn': 'localhost',
-        'pass': None,
-        'port': 25,
-        'proto': 'smtp',
-        'user': None,
-    }
+    assert aaa.mailer._conf['fqdn'] == 'localhost'
     aaa.mailer.send_email('address',' sbj', 'text')
     aaa.mailer.join()
 
@@ -519,14 +435,10 @@ def test_validate_registration_no_code():
 @with_setup(setup_mockedadmin, teardown_dir)
 @mock.patch.object(Mailer, '_send')
 def test_validate_registration(mocked):
-    # create registration
-    old_dir = os.getcwd()
-    os.chdir(testdir)
     aaa.register('user_foo', 'pwd', 'a@a.a')
-    os.chdir(old_dir)
     assert len(aaa._store.pending_registrations) == 1, repr(aaa._store.pending_registrations)
     # get the registration code, and run validate_registration
-    code = aaa._store.pending_registrations.keys()[0]
+    code = aaa._store.pending_registrations.get_key_helper(0)
     user_data = aaa._store.pending_registrations[code]
     aaa.validate_registration(code)
     assert user_data['username'] in aaa._store.users, "Account should have been added"
@@ -539,18 +451,15 @@ def test_validate_registration(mocked):
 @with_setup(setup_mockedadmin, teardown_dir)
 @mock.patch.object(Mailer, '_send')
 def test_purge_expired_registration(mocked):
-    old_dir = os.getcwd()
-    os.chdir(testdir)
     aaa.register('foo', 'pwd', 'a@a.a')
-    os.chdir(old_dir)
-    assert len(aaa._store.pending_registrations) == 1, "The registration should" \
-        " be present"
+    assert len(aaa._store.pending_registrations) == 1, "The registration should"\
+                                                       " be present"
     aaa._purge_expired_registrations()
-    assert len(aaa._store.pending_registrations) == 1, "The registration should " \
-        "be still there"
+    assert len(aaa._store.pending_registrations) == 1, "The registration should "\
+                                                       "be still there"
     aaa._purge_expired_registrations(exp_time=0)
-    assert len(aaa._store.pending_registrations) == 0, "The registration should " \
-        "have been removed"
+    assert len(aaa._store.pending_registrations) == 0, "The registration should "\
+                                                       "have been removed"
 
 
 @raises(AAAException)
@@ -586,23 +495,17 @@ def test_send_password_reset_email_incorrect_pair(mocked):
 @with_setup(setup_mockedadmin, teardown_dir)
 @mock.patch.object(Mailer, '_send')
 def test_send_password_reset_email_by_email_addr(mocked):
-    aaa._store.users['admin']['email_addr'] = 'admin@localhost.local'
-    old_dir = os.getcwd()
-    os.chdir(testdir)
+    aaa._store.users.update({'username':'admin', 'email_addr': 'admin@localhost.local'})
     aaa.send_password_reset_email(email_addr='admin@localhost.local')
-    os.chdir(old_dir)
-    #TODO: add UT
+    #TODO: add UT ??
 
 @with_setup(setup_mockedadmin, teardown_dir)
 @mock.patch.object(Mailer, '_send')
 def test_send_password_reset_email_by_username(mocked):
-    old_dir = os.getcwd()
-    os.chdir(testdir)
-    aaa._store.users['admin']['email_addr'] = 'admin@localhost.local'
+    aaa._store.users.update({'username':'admin', 'email_addr': 'admin@localhost.local'})
     assert not mocked.called
     aaa.send_password_reset_email(username='admin')
     aaa.mailer.join()
-    os.chdir(old_dir)
     assert mocked.called
     assert mocked.call_args[0][0] == 'admin@localhost.local'
 
@@ -660,11 +563,28 @@ def test_perform_password_reset_mangled_email():
 
 @with_setup(setup_mockedadmin, teardown_dir)
 def test_perform_password_reset():
-    old_dir = os.getcwd()
-    os.chdir(testdir)
     token = aaa._reset_code('admin', 'admin@localhost.local')
     aaa.reset_password(token, 'newpassword')
-    os.chdir(old_dir)
 
-
+#
+# Coverage is 82%. Some test ideas:
+#
+# MongoDbBackend.Users.__delitem__
+# MongoDbBackend.Users.pop
+#   - With invalid key
+#   - With no key
+# MongoDbBackend.Users.items (currently not used)
+# MongoDbBackend.Users.keys  (currently not used)
+# MongoDbBackend.Users.values (currently not used)
+# MongoDbBackend.Users.get
+#   - By key
+#   - With no key
+# MongoDbBackend.Roles.__delitem__
+# MongoDbBackend.Roles.pop
+#   - With invalid key
+#   - With no key
+# MongoDbBackend.PendingRegistrations.__contains__
+# MongoDbBackend.PendingRegistrations.__delitem__
+# MongoDbBackend.PendingRegistrations.__iter__
+# MongoDbBackend.PendingRegistrations.keys
 
