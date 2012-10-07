@@ -148,21 +148,27 @@ def test_loadjson_unchanged():
 @with_setup(setup_mockedadmin, teardown_dir)
 def test_password_hashing():
     shash = aaa._hash('user_foo', 'bogus_pwd')
-    assert len(shash) == 88, "hash length should be 88"
-    assert shash.endswith('=='), "hash should end with '=='"
+    assert len(shash) == 88, "hash length should be 88 and is %d" % len(shash)
+    assert shash.endswith('='), "hash should end with '='"
     assert aaa._verify_password('user_foo', 'bogus_pwd', shash) == True, \
         "Hashing verification should succeed"
 
 @with_setup(setup_mockedadmin, teardown_dir)
 def test_incorrect_password_hashing():
     shash = aaa._hash('user_foo', 'bogus_pwd')
-    assert len(shash) == 88, "hash length should be 88"
-    assert shash.endswith('=='), "hash should end with '=='"
+    assert len(shash) == 88, "hash length should be 88 and is %d" % len(shash)
+    assert shash.endswith('='), "hash should end with '='"
     assert aaa._verify_password('user_foo', '####', shash) == False, \
         "Hashing verification should fail"
     assert aaa._verify_password('###', 'bogus_pwd', shash) == False, \
         "Hashing verification should fail"
 
+@with_setup(setup_mockedadmin, teardown_dir)
+def test_password_hashing_collision():
+    salt = 'S' * 32
+    hash1 = aaa._hash('user_foo', 'bogus_pwd', salt=salt)
+    hash2 = aaa._hash('user_foobogus', '_pwd', salt=salt)
+    assert hash1 != hash2, "Hash collision"
 
 @with_setup(setup_mockedadmin, teardown_dir)
 def test_unauth_create_role():
@@ -272,6 +278,23 @@ def test_list_users():
 @with_setup(setup_mockedadmin, teardown_dir)
 def test_failing_login():
     login = aaa.login('phil', 'hunter123')
+    assert login == False, "Login must fail"
+    global cookie_name
+    assert cookie_name == None
+
+@with_setup(setup_mockedadmin, teardown_dir)
+def test_login_nonexistent_user_empty_password():
+    login = aaa.login('IAmNotHome', '')
+    assert login == False, "Login must fail"
+    global cookie_name
+    assert cookie_name == None
+
+@with_setup(setup_mockedadmin, teardown_dir)
+def test_login_existing_user_empty_password():
+    aaa.create_user('phil', 'user', 'hunter123')
+    assert 'phil' in aaa._store.users
+    assert aaa._store.users['phil']['role'] == 'user'
+    login = aaa.login('phil', '')
     assert login == False, "Login must fail"
     global cookie_name
     assert cookie_name == None
@@ -399,18 +422,69 @@ def test_register(mocked):
     assert len(aaa._store.pending_registrations) == 1, repr(aaa._store.pending_registrations)
 
 
+@with_setup(setup_mockedadmin, teardown_dir)
+def test_smtp_url_parsing_1():
+    c = aaa.mailer._parse_smtp_url('')
+    assert c['proto'] == 'smtp'
+    assert c['user'] == None
+    assert c['pass'] == None
+    assert c['fqdn'] == ''
+    assert c['port'] == 25
+
+@with_setup(setup_mockedadmin, teardown_dir)
+def test_smtp_url_parsing_2():
+    c = aaa.mailer._parse_smtp_url('starttls://foo')
+    assert c['proto'] == 'starttls'
+    assert c['user'] == None
+    assert c['pass'] == None
+    assert c['fqdn'] == 'foo'
+    assert c['port'] == 25
+
+@with_setup(setup_mockedadmin, teardown_dir)
+def test_smtp_url_parsing_3():
+    c = aaa.mailer._parse_smtp_url('foo:443')
+    assert c['proto'] == 'smtp'
+    assert c['user'] == None
+    assert c['pass'] == None
+    assert c['fqdn'] == 'foo'
+    assert c['port'] == 443
+
+@with_setup(setup_mockedadmin, teardown_dir)
+def test_smtp_url_parsing_4():
+    c = aaa.mailer._parse_smtp_url('ssl://user:pass@foo:443/')
+    assert c['proto'] == 'ssl'
+    assert c['user'] == 'user'
+    assert c['pass'] == 'pass'
+    assert c['fqdn'] == 'foo'
+    assert c['port'] == 443
+
+@with_setup(setup_mockedadmin, teardown_dir)
+def test_smtp_url_parsing_1():
+    c = aaa.mailer._parse_smtp_url('')
+    assert c['proto'] == 'smtp'
+    assert c['user'] == None
+    assert c['pass'] == None
+    assert c['fqdn'] == ''
+    assert c['port'] == 25
+
 # Patch the mailer _send() method to prevent network interactions
 @with_setup(setup_mockedadmin, teardown_dir)
 @mock.patch.object(Mailer, '_send')
 def test_send_email(mocked):
-    assert aaa.mailer.smtp_server == 'localhost'
+    assert aaa.mailer._conf == {
+        'fqdn': 'localhost',
+        'pass': None,
+        'port': 25,
+        'proto': 'smtp',
+        'user': None,
+    }
     aaa.mailer.send_email('address',' sbj', 'text')
     aaa.mailer.join()
 
 @raises(AAAException)
 @with_setup(setup_mockedadmin, teardown_dir)
 def test_do_not_send_email():
-    aaa.mailer.smtp_server = None # disable email delivery
+    aaa.mailer._conf['fqdn'] = None # disable email delivery
     aaa.mailer.send_email('address', 'sbj', 'text')
     aaa.mailer.join()
 
